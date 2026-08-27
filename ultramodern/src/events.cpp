@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cinttypes>
 #include <variant>
-#include <unordered_map>
 #include <utility>
 #include <mutex>
 #include <queue>
@@ -138,7 +137,9 @@ static struct {
     // Keep those writes from racing the HLE display-list parser.
     std::mutex graphics_rdram_mutex;
     uint8_t* rdram;
-    std::atomic_bool cpu_framebuffer_update_queued = false;
+    // Doraemon finishes its CPU framebuffer overlay from the scheduler thread.
+    // Once that hook is active, it becomes the single screen-update boundary.
+    std::atomic_bool scheduler_screen_update_active = false;
     moodycamel::BlockingConcurrentQueue<Action> action_queue{};
     moodycamel::BlockingConcurrentQueue<OSTask*> sp_task_queue{};
     moodycamel::ConcurrentQueue<OSThread*> deleted_threads{};
@@ -236,9 +237,13 @@ void vi_thread_func() {
         {
             std::lock_guard lock{ events_context.vi.regs_mutex };
 
-            // Queue a screen update for the graphics thread with the current VI register state.
-            // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
-            events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+            // Before Doraemon's scheduler hook becomes active, retain the
+            // runtime's normal VI-driven screen updates. Afterwards the hook
+            // queues the update after the complete CPU text/menu overlay, so
+            // an intermediate framebuffer without text is never presented.
+            if (!events_context.scheduler_screen_update_active.load(std::memory_order_acquire)) {
+                events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+            }
 
             // Update VI registers and swap VI modes.
             events_context.vi.update_vi();
@@ -401,11 +406,6 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 // to the new current framebuffer. Use the VI snapshot captured
                 // by that hook rather than the previous retrace's registers.
                 events_context.vi.update_screen_regs = screen_update_action->regs;
-                if (screen_update_action->cpu_changes_only) {
-                    // Allow a later CPU framebuffer write to queue another
-                    // update while this one is being processed.
-                    events_context.cpu_framebuffer_update_queued.store(false, std::memory_order_release);
-                }
                 renderer_context->update_screen(screen_update_action->cpu_changes_only);
                 display_refresh_rate = renderer_context->get_display_framerate();
                 resolution_scale = renderer_context->get_resolution_scale();
@@ -596,17 +596,18 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
 }
 
 extern "C" void ultramodern_notify_cpu_framebuffer_write(uint8_t*) {
-    // Doraemon draws dialogue glyphs directly into the current 16-bit
-    // framebuffer from recompiled CPU code. Coalesce notifications so glyph
-    // runs do not flood the graphics queue.
-    if (!events_context.cpu_framebuffer_update_queued.exchange(true, std::memory_order_acq_rel)) {
-        ultramodern::renderer::ViRegs current_vi_regs;
-        {
-            std::lock_guard lock{ events_context.vi.regs_mutex };
-            current_vi_regs = events_context.vi.regs;
-        }
-        events_context.action_queue.enqueue(ScreenUpdateAction{ current_vi_regs, true });
+    // Doraemon calls this once per retrace after compositing its complete CPU
+    // text/menu overlay and before submitting work for the next frame. Make
+    // this the sole presentation boundary instead of presenting both the
+    // pre-overlay and post-overlay versions of the framebuffer.
+    events_context.scheduler_screen_update_active.store(true, std::memory_order_release);
+
+    ultramodern::renderer::ViRegs current_vi_regs;
+    {
+        std::lock_guard lock{ events_context.vi.regs_mutex };
+        current_vi_regs = events_context.vi.regs;
     }
+    events_context.action_queue.enqueue(ScreenUpdateAction{ current_vi_regs });
 }
 
 void ultramodern::send_si_message() {
