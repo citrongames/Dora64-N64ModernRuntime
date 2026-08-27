@@ -8,6 +8,7 @@
 #include <mutex>
 #include <queue>
 #include <cstring>
+#include <cstdio>
 
 #include "blockingconcurrentqueue.h"
 
@@ -30,6 +31,7 @@ struct SpTaskAction {
 
 struct ScreenUpdateAction {
     ultramodern::renderer::ViRegs regs;
+    bool cpu_changes_only = false;
 };
 
 struct UpdateConfigAction {
@@ -62,6 +64,7 @@ static struct {
         ViState states[2];
         ultramodern::renderer::ViRegs regs;
         ultramodern::renderer::ViRegs update_screen_regs;
+        std::mutex regs_mutex;
 
         ViState* get_next_state() {
             return &states[cur_state ^ 1];
@@ -131,11 +134,19 @@ static struct {
     } si;
     // The same message queue may be used for multiple events, so share a mutex for all of them
     std::mutex message_mutex;
+    // PI DMA can overwrite display-list resources as soon as the game receives SP completion.
+    // Keep those writes from racing the HLE display-list parser.
+    std::mutex graphics_rdram_mutex;
     uint8_t* rdram;
+    std::atomic_bool cpu_framebuffer_update_queued = false;
     moodycamel::BlockingConcurrentQueue<Action> action_queue{};
     moodycamel::BlockingConcurrentQueue<OSTask*> sp_task_queue{};
     moodycamel::ConcurrentQueue<OSThread*> deleted_threads{};
 } events_context{};
+
+std::mutex& ultramodern::get_graphics_rdram_mutex() {
+    return events_context.graphics_rdram_mutex;
+}
 
 ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
     return &events_context.vi.update_screen_regs;
@@ -222,12 +233,16 @@ void vi_thread_func() {
             events_context.action_queue.enqueue(DummyWorkloadAction{events_context.vi.get_next_state()->framebuffer});
         }
 
-        // Queue a screen update for the graphics thread with the current VI register state.
-        // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
-        events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+        {
+            std::lock_guard lock{ events_context.vi.regs_mutex };
 
-        // Update VI registers and swap VI modes.
-        events_context.vi.update_vi();
+            // Queue a screen update for the graphics thread with the current VI register state.
+            // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
+            events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
+
+            // Update VI registers and swap VI modes.
+            events_context.vi.update_vi();
+        }
 
         // If the game has started, handle sending VI and AI events.
         if (ultramodern::is_game_started()) {
@@ -359,6 +374,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
         if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
             // Determine the action type and act on it
             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
+                std::unique_lock rdram_lock{ events_context.graphics_rdram_mutex };
                 // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
                 // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
                 // is finished as well, so sending this early shouldn't be an issue in most cases.
@@ -372,6 +388,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
                 renderer_context->send_dl(&task_action->task);
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+                rdram_lock.unlock();
 
                 dp_complete();
                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
@@ -380,8 +397,16 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 // printf("Renderer ProcessDList time: %d us\n", static_cast<u32>(std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count()));
             }
             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
+                // A dialogue hook runs from the scheduler after it has switched
+                // to the new current framebuffer. Use the VI snapshot captured
+                // by that hook rather than the previous retrace's registers.
                 events_context.vi.update_screen_regs = screen_update_action->regs;
-                renderer_context->update_screen();
+                if (screen_update_action->cpu_changes_only) {
+                    // Allow a later CPU framebuffer write to queue another
+                    // update while this one is being processed.
+                    events_context.cpu_framebuffer_update_queued.store(false, std::memory_order_release);
+                }
+                renderer_context->update_screen(screen_update_action->cpu_changes_only);
                 display_refresh_rate = renderer_context->get_display_framerate();
                 resolution_scale = renderer_context->get_resolution_scale();
             }
@@ -567,6 +592,20 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
     // Set all other tasks as the RSP task
     else {
         events_context.sp_task_queue.enqueue(task);
+    }
+}
+
+extern "C" void ultramodern_notify_cpu_framebuffer_write(uint8_t*) {
+    // Doraemon draws dialogue glyphs directly into the current 16-bit
+    // framebuffer from recompiled CPU code. Coalesce notifications so glyph
+    // runs do not flood the graphics queue.
+    if (!events_context.cpu_framebuffer_update_queued.exchange(true, std::memory_order_acq_rel)) {
+        ultramodern::renderer::ViRegs current_vi_regs;
+        {
+            std::lock_guard lock{ events_context.vi.regs_mutex };
+            current_vi_regs = events_context.vi.regs;
+        }
+        events_context.action_queue.enqueue(ScreenUpdateAction{ current_vi_regs, true });
     }
 }
 

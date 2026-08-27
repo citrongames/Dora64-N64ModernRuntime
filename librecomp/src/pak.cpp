@@ -4,6 +4,10 @@
 #include "recomp.h"
 #include "helpers.hpp"
 
+extern "C" void osPfsInit_recomp(uint8_t * rdram, recomp_context* ctx) {
+    ctx->r2 = 1; // PFS_ERR_NOPACK
+}
+
 extern "C" void osPfsInitPak_recomp(uint8_t * rdram, recomp_context* ctx) {
     ctx->r2 = 1; // PFS_ERR_NOPACK
 }

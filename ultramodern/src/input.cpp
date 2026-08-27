@@ -94,12 +94,30 @@ static void __osContGetInitData(u8* pattern, OSContStatus *data) {
     }
 }
 
+static void write_cont_statuses_to_rdram(RDRAM_ARG PTR(OSContStatus) data, const OSContStatus* statuses) {
+    for (int controller = 0; controller < MAXCONTROLLERS; controller++) {
+        const PTR(OSContStatus) output = data + controller * sizeof(OSContStatus);
+        const PTR(u16) type_output = output ^ 2;
+        const PTR(u8) status_output = (output + 2) ^ 3;
+        const PTR(u8) error_output = (output + 3) ^ 3;
+
+        // N64 RDRAM is word-byte-swapped on the host. OSContStatus is often
+        // embedded at an address that isn't word-aligned, so copying the host
+        // structure directly shifts fields across adjacent controller entries.
+        // Store each guest field at its real N64 offset instead.
+        *TO_PTR(u16, type_output) = statuses[controller].type;
+        *TO_PTR(u8, status_output) = statuses[controller].status;
+        *TO_PTR(u8, error_output) = statuses[controller].err_no;
+    }
+}
+
 extern "C" s32 osContInit(RDRAM_ARG PTR(OSMesgQueue) mq, u8* bitpattern, PTR(OSContStatus) data_) {
-    OSContStatus *data = TO_PTR(OSContStatus, data_);
+    OSContStatus data[MAXCONTROLLERS]{};
 
     max_controllers = MAXCONTROLLERS;
 
     __osContGetInitData(bitpattern, data);
+    write_cont_statuses_to_rdram(PASS_RDRAM data_, data);
 
     return 0;
 }
@@ -133,10 +151,11 @@ extern "C" s32 osContSetCh(RDRAM_ARG u8 ch) {
 }
 
 extern "C" void osContGetQuery(RDRAM_ARG PTR(OSContStatus) data_) {
-    OSContStatus *data = TO_PTR(OSContStatus, data_);
+    OSContStatus data[MAXCONTROLLERS]{};
     u8 pattern;
 
     __osContGetInitData(&pattern, data);
+    write_cont_statuses_to_rdram(PASS_RDRAM data_, data);
 }
 
 void convert_to_n64_range(float x, float y, int8_t& stick_x, int8_t& stick_y) {

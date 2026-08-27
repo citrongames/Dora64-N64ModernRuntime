@@ -266,7 +266,22 @@ void ultramodern::join_saving_thread() {
     }
 }
 
-void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
+void do_dma(
+    RDRAM_ARG
+    PTR(OSMesgQueue) mq,
+    OSMesg completion_message,
+    gpr rdram_address,
+    uint32_t physical_addr,
+    uint32_t size,
+    uint32_t direction
+) {
+    // Some games pass a physical RDRAM address to PI DMA instead of KSEG0.
+    // MEM_* macros expect a sign-extended KSEG0 address.
+    if ((uint32_t)rdram_address < 0x00800000) {
+        rdram_address = (gpr)(int32_t)(
+            0x80000000u | (uint32_t)rdram_address
+        );
+    }
     // TODO asynchronous transfer
     // TODO implement unaligned DMA correctly
     if (direction == 0) {
@@ -275,7 +290,12 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
             recomp::do_rom_read(rdram, rdram_address, physical_addr, size);
 
             // Send a message to the mq to indicate that the transfer completed
-            ultramodern::enqueue_external_message_src(mq, 0, false, ultramodern::EventMessageSource::Pi);
+            ultramodern::enqueue_external_message_src(
+                mq,
+                completion_message,
+                false,
+                ultramodern::EventMessageSource::Pi
+            );
         } else if (physical_addr >= recomp::sram_base) {
             if (!recomp::sram_allowed()) {
                 ultramodern::error_handling::message_box("Attempted to use SRAM saving with other save type");
@@ -285,7 +305,12 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
             save_read(rdram, rdram_address, physical_addr - recomp::sram_base, size);
 
             // Send a message to the mq to indicate that the transfer completed
-            ultramodern::enqueue_external_message_src(mq, 0, false, ultramodern::EventMessageSource::Pi);
+            ultramodern::enqueue_external_message_src(
+                mq,
+                completion_message,
+                false,
+                ultramodern::EventMessageSource::Pi
+            );
         } else {
             fprintf(stderr, "[WARN] PI DMA read from unknown region, phys address 0x%08X\n", physical_addr);
         }
@@ -302,7 +327,12 @@ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_
             save_write(rdram, rdram_address, physical_addr - recomp::sram_base, size);
 
             // Send a message to the mq to indicate that the transfer completed
-            ultramodern::enqueue_external_message_src(mq, 0, false, ultramodern::EventMessageSource::Pi);
+            ultramodern::enqueue_external_message_src(
+                mq,
+                completion_message,
+                false,
+                ultramodern::EventMessageSource::Pi
+            );
         } else {
             fprintf(stderr, "[WARN] PI DMA write to unknown region, phys address 0x%08X\n", physical_addr);
         }
@@ -321,7 +351,8 @@ extern "C" void osPiStartDma_recomp(RDRAM_ARG recomp_context* ctx) {
 
     debug_printf("[pi] DMA from 0x%08X into 0x%08X of size 0x%08X\n", devAddr, dramAddr, size);
 
-    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction);
+    std::scoped_lock rdram_lock{ ultramodern::get_graphics_rdram_mutex() };
+    do_dma(PASS_RDRAM mq, static_cast<OSMesg>(mb), dramAddr, physical_addr, size, direction);
 
     ctx->r2 = 0;
 }
@@ -338,7 +369,8 @@ extern "C" void osEPiStartDma_recomp(RDRAM_ARG recomp_context* ctx) {
 
     debug_printf("[pi] DMA from 0x%08X into 0x%08X of size 0x%08X\n", devAddr, dramAddr, size);
 
-    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction);
+    std::scoped_lock rdram_lock{ ultramodern::get_graphics_rdram_mutex() };
+    do_dma(PASS_RDRAM mq, static_cast<OSMesg>(ctx->r5), dramAddr, physical_addr, size, direction);
 
     ctx->r2 = 0;
 }

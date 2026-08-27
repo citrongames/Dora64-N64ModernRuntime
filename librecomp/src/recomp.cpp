@@ -707,6 +707,8 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
             {
                 if (!recomp::load_stored_rom(current_game.value())) {
                     ultramodern::error_handling::message_box("Error opening stored ROM! Please restart this program.");
+                    ultramodern::quit();
+                    return true;
                 }
 
                 auto find_it = game_roms.find(current_game.value());

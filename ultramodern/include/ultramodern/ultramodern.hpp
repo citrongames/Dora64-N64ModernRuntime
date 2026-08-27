@@ -3,6 +3,7 @@
 
 #include <thread>
 #include <cassert>
+#include <mutex>
 #include <stdexcept>
 #include <span>
 #include <chrono>
@@ -101,6 +102,7 @@ bool is_entrypoint_thread();
 bool is_game_thread();
 void submit_rsp_task(RDRAM_ARG PTR(OSTask) task);
 void send_si_message();
+std::mutex& get_graphics_rdram_mutex();
 uint32_t get_speed_multiplier();
 
 // Time

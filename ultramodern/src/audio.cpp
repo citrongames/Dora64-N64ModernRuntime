@@ -57,8 +57,12 @@ uint32_t ultramodern::get_remaining_audio_bytes() {
     // audio popping on games that use the buffered audio byte count to determine how many samples
     // to generate.
     uint32_t samples_per_vi = (sample_rate / 60);
-    if (buffered_byte_count > static_cast<uint32_t>(buffer_offset_frames * sizeof(int16_t) * samples_per_vi)) {
-        buffered_byte_count -= static_cast<uint32_t>(buffer_offset_frames * sizeof(int16_t) * samples_per_vi);
+    constexpr uint32_t channel_count = 2;
+    const uint32_t buffer_offset_bytes = static_cast<uint32_t>(
+        buffer_offset_frames * channel_count * sizeof(int16_t) * samples_per_vi
+    );
+    if (buffered_byte_count > buffer_offset_bytes) {
+        buffered_byte_count -= buffer_offset_bytes;
     }
     else {
         buffered_byte_count = 0;
