@@ -68,6 +68,10 @@ namespace ultramodern {
             bool developer_mode;
             Resolution res_option;
             WindowMode wm_option;
+            int display_index = 0;
+            int display_width = 1280;
+            int display_height = 720;
+            int display_refresh_rate = 0;
             HUDRatioMode hr_option;
             GraphicsApi api_option;
             AspectRatio ar_option;
