@@ -45,6 +45,11 @@ namespace ultramodern {
             MSAA8X,
             OptionCount
         };
+        enum class TextureFiltering {
+            ThreePoint,
+            Bilinear,
+            OptionCount
+        };
         enum class RefreshRate {
             Original,
             Display,
@@ -76,6 +81,7 @@ namespace ultramodern {
             GraphicsApi api_option;
             AspectRatio ar_option;
             Antialiasing msaa_option;
+            TextureFiltering tf_option = TextureFiltering::ThreePoint;
             RefreshRate rr_option;
             HighPrecisionFramebuffer hpfb_option;
             int rr_manual_value;
@@ -124,6 +130,12 @@ namespace ultramodern {
             {ultramodern::renderer::Antialiasing::MSAA2X, "MSAA2X"},
             {ultramodern::renderer::Antialiasing::MSAA4X, "MSAA4X"},
             {ultramodern::renderer::Antialiasing::MSAA8X, "MSAA8X"},
+        });
+
+        NLOHMANN_JSON_SERIALIZE_ENUM(ultramodern::renderer::TextureFiltering, {
+            {ultramodern::renderer::TextureFiltering::ThreePoint, "ThreePoint"},
+            {ultramodern::renderer::TextureFiltering::Bilinear, "Bilinear"},
+            {ultramodern::renderer::TextureFiltering::Bilinear, "Linear"},
         });
 
         NLOHMANN_JSON_SERIALIZE_ENUM(ultramodern::renderer::RefreshRate, {
