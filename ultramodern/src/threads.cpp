@@ -2,6 +2,10 @@
 #include <thread>
 #include <cassert>
 #include <string>
+#include <algorithm>
+#include <condition_variable>
+#include <mutex>
+#include <vector>
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
@@ -33,6 +37,19 @@ thread_local bool is_entrypoint_thread = false;
 // Whether this thread is part of the game (i.e. the start thread or one spawned by osCreateThread)
 thread_local bool is_game_thread = false;
 thread_local PTR(OSThread) thread_self = NULLPTR;
+
+namespace {
+struct GuestThread {
+    PTR(OSThread) thread;
+    UltraThreadContext* context;
+};
+
+std::mutex guest_threads_mutex;
+std::condition_variable guest_threads_changed;
+std::vector<GuestThread> guest_threads;
+}
+
+void ultramodern_clear_running_queue_for_game_reset();
 
 void ultramodern::set_entrypoint_thread() {
     ::is_game_thread = true;
@@ -263,6 +280,10 @@ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_f
     // Pass the context as an argument to the thread function to ensure that it can't get cleared before the thread captures its value.
     UltraThreadContext* context = new UltraThreadContext{};
     t->context = context;
+    {
+        std::lock_guard lock{guest_threads_mutex};
+        guest_threads.push_back(GuestThread{t_, context});
+    }
     context->host_thread = std::thread{_thread_func, PASS_RDRAM t_, entrypoint, arg, t->context};
 
     // Wait until the thread is initialized to indicate that it's ready to be started.
@@ -363,7 +384,51 @@ void ultramodern::init_thread_cleanup() {
 }
 
 void ultramodern::cleanup_thread(UltraThreadContext *cur_context) {
+    {
+        std::lock_guard lock{guest_threads_mutex};
+        std::erase_if(guest_threads, [cur_context](const GuestThread& thread) {
+            return thread.context == cur_context;
+        });
+    }
+    guest_threads_changed.notify_all();
     deleted_threads.enqueue(cur_context);
+}
+
+[[noreturn]] void ultramodern::terminate_game_threads_for_reset(RDRAM_ARG1) {
+    const PTR(OSThread) current_thread = ultramodern::this_thread();
+
+    {
+        std::lock_guard lock{guest_threads_mutex};
+
+        // Guest execution is cooperative, so only the caller is running here.
+        // Detach every OSThread from its host context before waking the paused
+        // threads. wait_for_resumed will then terminate them without touching
+        // any RDRAM that the next boot is about to replace.
+        for (const GuestThread& guest : guest_threads) {
+            OSThread* thread = TO_PTR(OSThread, guest.thread);
+            if (thread->context == guest.context) {
+                thread->context = nullptr;
+            }
+        }
+
+        ultramodern_clear_running_queue_for_game_reset();
+
+        for (const GuestThread& guest : guest_threads) {
+            if (guest.thread != current_thread) {
+                guest.context->running.signal();
+            }
+        }
+    }
+
+    // The current guest thread cannot return into the old game session.
+    throw ultramodern::thread_terminated{};
+}
+
+void ultramodern::wait_for_game_threads_stopped() {
+    std::unique_lock lock{guest_threads_mutex};
+    guest_threads_changed.wait(lock, [] {
+        return guest_threads.empty();
+    });
 }
 
 void ultramodern::join_thread_cleaner_thread() {

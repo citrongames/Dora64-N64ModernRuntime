@@ -37,7 +37,11 @@ struct RemoveTimerAction {
     PTR(OSTimer) timer;
 };
 
-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
+struct ResetTimersAction {
+    moodycamel::LightweightSemaphore* completed;
+};
+
+using Action = std::variant<AddTimerAction, RemoveTimerAction, ResetTimersAction>;
 
 struct {
     std::thread thread;
@@ -94,6 +98,9 @@ void timer_thread(RDRAM_ARG1) {
             active_timers.insert(add_action->timer);
         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
             active_timers.erase(remove_action->timer);
+        } else if (const auto* reset_action = std::get_if<ResetTimersAction>(&action)) {
+            active_timers.clear();
+            reset_action->completed->signal();
         }
     };
 
@@ -143,6 +150,12 @@ void timer_thread(RDRAM_ARG1) {
 void ultramodern::init_timers(RDRAM_ARG1) {
     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
     timer_context.thread.detach();
+}
+
+void ultramodern::reset_timers_for_game_reset() {
+    moodycamel::LightweightSemaphore completed;
+    timer_context.action_queue.enqueue(ResetTimersAction{&completed});
+    completed.wait();
 }
 
 uint32_t ultramodern::get_speed_multiplier() {

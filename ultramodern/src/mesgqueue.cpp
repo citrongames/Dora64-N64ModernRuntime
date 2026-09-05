@@ -67,6 +67,12 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
     }
 }
 
+void ultramodern::reset_message_queues_for_game_reset() {
+    QueuedMessage message;
+    while (external_messages.try_dequeue(message)) {
+    }
+}
+
 extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
     OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
     mq->blocked_on_recv = NULLPTR;

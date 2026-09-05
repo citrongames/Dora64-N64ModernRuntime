@@ -273,6 +273,9 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
 
 void recomp::overlays::init_overlays() {
     func_map.clear();
+    loaded_sections.clear();
+    code_sections_by_rom.clear();
+    free(section_addresses);
     section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
 
     // Sort the executable sections by rom address

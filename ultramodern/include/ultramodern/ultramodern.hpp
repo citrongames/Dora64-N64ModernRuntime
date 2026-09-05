@@ -38,6 +38,10 @@ void init_saving(RDRAM_ARG1);
 void init_events(RDRAM_ARG renderer::WindowHandle window_handle);
 void init_timers(RDRAM_ARG1);
 void init_thread_cleanup();
+void reset_events_for_game_reset(RDRAM_ARG1);
+void resume_events_after_game_reset();
+void reset_timers_for_game_reset();
+void reset_message_queues_for_game_reset();
 
 // Saving
 void change_save_file(const std::u8string& subfolder, const std::u8string& name);
@@ -84,6 +88,8 @@ void run_next_thread_and_wait(RDRAM_ARG1);
 void resume_thread_and_wait(RDRAM_ARG OSThread* t);
 void schedule_running_thread(RDRAM_ARG PTR(OSThread) t);
 void cleanup_thread(UltraThreadContext* thread_context);
+[[noreturn]] void terminate_game_threads_for_reset(RDRAM_ARG1);
+void wait_for_game_threads_stopped();
 struct thread_terminated : std::exception {};
 
 enum class ThreadPriority {

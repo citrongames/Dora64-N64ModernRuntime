@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cuchar>
 #include <charconv>
+#include <condition_variable>
 
 #include "recomp.h"
 #include "librecomp/overlays.hpp"
@@ -41,6 +42,7 @@
 enum GameStatus {
     None,
     Running,
+    Resetting,
     Quit
 };
 
@@ -472,6 +474,9 @@ extern "C" void do_break(uint32_t vram) {
 std::string current_game_mode_id;
 std::optional<std::u8string> current_game = std::nullopt;
 std::atomic<GameStatus> game_status = GameStatus::None;
+std::atomic_bool game_reset_pending = false;
+std::mutex game_reset_mutex;
+std::condition_variable game_reset_changed;
 
 void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
     auto find_it = game_roms.find(current_game.value());
@@ -545,7 +550,7 @@ void recomp::start_game(const std::u8string& game_id, const std::string& game_mo
 }
 
 bool ultramodern::is_game_started() {
-    return game_status.load() != GameStatus::None;
+    return game_status.load() == GameStatus::Running;
 }
 
 std::atomic_bool exited = false;
@@ -556,8 +561,20 @@ void ultramodern::quit() {
     GameStatus desired = GameStatus::None;
     game_status.compare_exchange_strong(desired, GameStatus::Quit);
     game_status.notify_all();
+    game_reset_changed.notify_all();
     std::lock_guard<std::mutex> lock(current_game_mutex);
     current_game.reset();
+}
+
+extern "C" void recomp_request_game_reset(uint8_t* rdram) {
+    game_reset_pending.store(true, std::memory_order_release);
+    game_status.store(GameStatus::Resetting, std::memory_order_release);
+    game_reset_changed.notify_all();
+
+    // This function is called by a guest thread at the end of a completed
+    // frame. It never returns into the old session: all guest threads are
+    // cooperatively detached and the game supervisor performs a cold boot.
+    ultramodern::terminate_game_threads_for_reset(rdram);
 }
 
 void recomp::mods::enable_mod(const std::string& mod_id, bool enabled) {
@@ -755,10 +772,47 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                 save_type = game_entry.save_type;
                 ultramodern::init_saving(rdram);
 
-                try {
-                    game_entry.entrypoint(rdram, context);
-                } catch (ultramodern::thread_terminated& terminated) {
+                for (;;) {
+                    try {
+                        game_entry.entrypoint(rdram, context);
+                    } catch (ultramodern::thread_terminated& terminated) {
+                    }
 
+                    std::unique_lock reset_lock{game_reset_mutex};
+                    game_reset_changed.wait(reset_lock, [] {
+                        return game_reset_pending.load(std::memory_order_acquire) ||
+                               exited.load(std::memory_order_acquire);
+                    });
+
+                    if (exited.load(std::memory_order_acquire)) {
+                        return true;
+                    }
+                    reset_lock.unlock();
+
+                    ultramodern::wait_for_game_threads_stopped();
+                    ultramodern::reset_timers_for_game_reset();
+                    ultramodern::reset_events_for_game_reset(rdram);
+                    ultramodern::reset_message_queues_for_game_reset();
+
+                    // The save buffer belongs to the host runtime and is
+                    // intentionally left intact. Only emulated RAM is reset,
+                    // so unsaved progress is discarded and the game's normal
+                    // boot code reloads durable EEPROM records itself.
+                    {
+                        std::lock_guard rdram_lock{ultramodern::get_graphics_rdram_mutex()};
+                        std::memset(rdram, 0, recomp::mem_size);
+                        *context = recomp_context{};
+                        init(rdram, context, game_entry.entrypoint_address);
+                        if (game_entry.on_init_callback) {
+                            game_entry.on_init_callback(rdram, context);
+                        }
+                        recomp::init_heap(rdram, recomp::mod_rdram_start + mod_ram_used);
+                    }
+
+                    game_reset_pending.store(false, std::memory_order_release);
+                    game_status.store(GameStatus::Running, std::memory_order_release);
+                    ultramodern::resume_events_after_game_reset();
+                    std::puts("Game soft reset complete: cold boot restarted");
                 }
             }
             return true;
@@ -766,9 +820,14 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
         case GameStatus::Quit:
             return true;
 
+        case GameStatus::Resetting:
+            return true;
+
         case GameStatus::None:
             return true;
     }
+
+    return true;
 }
 
 recomp::SaveType recomp::get_save_type() {

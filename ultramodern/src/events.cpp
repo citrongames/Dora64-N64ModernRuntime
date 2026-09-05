@@ -40,7 +40,11 @@ struct DummyWorkloadAction {
     int32_t fb_address;
 };
 
-using Action = std::variant<SpTaskAction, ScreenUpdateAction, UpdateConfigAction, DummyWorkloadAction>;
+struct GameResetBarrierAction {
+    moodycamel::LightweightSemaphore* completed;
+};
+
+using Action = std::variant<SpTaskAction, ScreenUpdateAction, UpdateConfigAction, DummyWorkloadAction, GameResetBarrierAction>;
 
 struct ViState {
     const OSViMode* mode;
@@ -140,6 +144,7 @@ static struct {
     // Doraemon finishes its CPU framebuffer overlay from the scheduler thread.
     // Once that hook is active, it becomes the single screen-update boundary.
     std::atomic_bool scheduler_screen_update_active = false;
+    std::atomic_bool game_reset_paused = false;
     moodycamel::BlockingConcurrentQueue<Action> action_queue{};
     moodycamel::BlockingConcurrentQueue<OSTask*> sp_task_queue{};
     moodycamel::ConcurrentQueue<OSThread*> deleted_threads{};
@@ -225,6 +230,10 @@ void vi_thread_func() {
         }
         total_vis = new_total_vis;
 
+        if (events_context.game_reset_paused.load(std::memory_order_acquire)) {
+            continue;
+        }
+
         // If the game hasn't started yet, set a dummy VI mode and origin.
         if (!ultramodern::is_game_started()) {
             static bool odd = false;
@@ -301,6 +310,12 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
 
         if (task == nullptr) {
             return;
+        }
+
+        if (task == reinterpret_cast<OSTask*>(1)) {
+            extern moodycamel::LightweightSemaphore* game_reset_sp_barrier;
+            game_reset_sp_barrier->signal();
+            continue;
         }
 
         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
@@ -420,6 +435,13 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
             else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
                 renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
             }
+            else if (const auto* reset_action = std::get_if<GameResetBarrierAction>(&action)) {
+                // The host renderer survives an in-process game reset. Reset
+                // its emulated RSP/RDP session after all old display lists have
+                // been parsed and before the guest RDRAM is cleared.
+                renderer_context->reset_game();
+                reset_action->completed->signal();
+            }
         }
     }
 
@@ -477,6 +499,56 @@ void set_dummy_vi(bool odd) {
     if (odd) {
         next_state->framebuffer += 0x25800;
     }
+}
+
+moodycamel::LightweightSemaphore* game_reset_sp_barrier = nullptr;
+
+void ultramodern::reset_events_for_game_reset(RDRAM_ARG1) {
+    events_context.game_reset_paused.store(true, std::memory_order_release);
+
+    // Finish all RSP work submitted by the old session before its RDRAM is
+    // cleared. The sentinel is ordered after the previously queued tasks.
+    moodycamel::LightweightSemaphore sp_completed;
+    game_reset_sp_barrier = &sp_completed;
+    events_context.sp_task_queue.enqueue(reinterpret_cast<OSTask*>(1));
+    sp_completed.wait();
+    game_reset_sp_barrier = nullptr;
+
+    // Do the same for graphics and screen-update work.
+    moodycamel::LightweightSemaphore gfx_completed;
+    events_context.action_queue.enqueue(GameResetBarrierAction{&gfx_completed});
+    gfx_completed.wait();
+
+    {
+        std::scoped_lock lock{events_context.message_mutex, events_context.vi.regs_mutex};
+        events_context.sp.mq = NULLPTR;
+        events_context.sp.msg = 0;
+        events_context.dp.mq = NULLPTR;
+        events_context.dp.msg = 0;
+        events_context.ai.mq = NULLPTR;
+        events_context.ai.msg = 0;
+        events_context.si.mq = NULLPTR;
+        events_context.si.msg = 0;
+
+        ViState clean_vi{};
+        clean_vi.mode = &dummy_mode;
+        clean_vi.framebuffer = 0x80700000;
+        clean_vi.control = dummy_mode.comRegs.ctrl;
+        clean_vi.retrace_count = 1;
+        events_context.vi.cur_state = 0;
+        events_context.vi.field = 0;
+        events_context.vi.states[0] = clean_vi;
+        clean_vi.framebuffer = 0x80725800;
+        events_context.vi.states[1] = clean_vi;
+        events_context.vi.regs = {};
+        events_context.vi.update_screen_regs = {};
+    }
+
+    events_context.scheduler_screen_update_active.store(false, std::memory_order_release);
+}
+
+void ultramodern::resume_events_after_game_reset() {
+    events_context.game_reset_paused.store(false, std::memory_order_release);
 }
 
 extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {

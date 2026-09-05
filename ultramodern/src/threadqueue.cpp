@@ -65,3 +65,7 @@ PTR(OSThread) ultramodern::thread_queue_peek(RDRAM_ARG PTR(PTR(OSThread)) queue_
     PTR(OSThread)* queue = queue_to_ptr(PASS_RDRAM queue_);
     return *queue;
 }
+
+void ultramodern_clear_running_queue_for_game_reset() {
+    running_queue_impl = NULLPTR;
+}
