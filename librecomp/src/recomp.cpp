@@ -546,7 +546,16 @@ void recomp::start_game(const std::u8string& game_id, const std::string& game_mo
     current_game = game_id;
     game_status.store(GameStatus::Running);
     game_status.notify_all();
-    mods::set_latest_game_mode_id(game_mode_id);
+    // Games without a mod identifier do not have a mod configuration to save.
+    bool supports_mods = false;
+    {
+        std::lock_guard<std::mutex> games_lock(game_roms_mutex);
+        const auto game_it = game_roms.find(game_id);
+        supports_mods = game_it != game_roms.end() && !game_it->second.mod_game_id.empty();
+    }
+    if (supports_mods) {
+        mods::set_latest_game_mode_id(game_mode_id);
+    }
 }
 
 bool ultramodern::is_game_started() {
@@ -886,8 +895,21 @@ void recomp::start(const recomp::Configuration& cfg) {
 
     ultramodern::set_message_queue_control(cfg.message_queue_control);
 
-    recomp::mods::initialize_mods();
-    recomp::mods::scan_mods();
+    // Only initialize on-disk mod storage when a registered game supports mods.
+    bool supports_mods = false;
+    {
+        std::lock_guard<std::mutex> games_lock(game_roms_mutex);
+        for (const auto& [game_id, game_entry] : game_roms) {
+            if (!game_entry.mod_game_id.empty()) {
+                supports_mods = true;
+                break;
+            }
+        }
+    }
+    if (supports_mods) {
+        recomp::mods::initialize_mods();
+        recomp::mods::scan_mods();
+    }
 
     // Allocate rdram without comitting it. Use a platform-specific virtual allocation function
     // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
