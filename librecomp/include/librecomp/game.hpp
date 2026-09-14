@@ -38,6 +38,10 @@ namespace recomp {
 
         void (*on_init_callback)(uint8_t* rdram, recomp_context* context) = nullptr;
 
+        // Optional existing ROM file selected by the host, without importing or renaming it.
+        // Empty retains the canonical stored filename in the configuration directory.
+        std::filesystem::path rom_path;
+
         std::u8string stored_filename() const;
     };
     struct Version {

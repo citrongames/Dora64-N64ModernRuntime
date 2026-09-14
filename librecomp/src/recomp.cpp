@@ -197,15 +197,10 @@ bool write_file(const std::filesystem::path& path, const std::vector<uint8_t>& d
 }
 
 bool check_stored_rom(const recomp::GameEntry& game_entry) {
-    std::vector stored_rom_data = read_file(config_path / game_entry.stored_filename());
-
-    if (!check_hash(stored_rom_data, game_entry.rom_hash)) {
-        // Incorrect hash, remove the stored ROM file if it exists.
-        std::filesystem::remove(config_path / game_entry.stored_filename());
-        return false;
-    }
-
-    return true;
+    const auto rom_path = game_entry.rom_path.empty() ?
+        config_path / game_entry.stored_filename() : game_entry.rom_path;
+    const auto stored_rom_data = read_file(rom_path);
+    return check_hash(stored_rom_data, game_entry.rom_hash);
 }
 
 static std::unordered_set<std::u8string> valid_game_roms;
@@ -229,11 +224,12 @@ bool recomp::load_stored_rom(std::u8string& game_id) {
         return false;
     }
     
-    std::vector<uint8_t> stored_rom_data = read_file(config_path / find_it->second.stored_filename());
+    const GameEntry& game_entry = find_it->second;
+    const auto rom_path = game_entry.rom_path.empty() ?
+        config_path / game_entry.stored_filename() : game_entry.rom_path;
+    std::vector<uint8_t> stored_rom_data = read_file(rom_path);
 
-    if (!check_hash(stored_rom_data, find_it->second.rom_hash)) {
-        // The ROM no longer has the right hash, delete it.
-        std::filesystem::remove(config_path / find_it->second.stored_filename());
+    if (!check_hash(stored_rom_data, game_entry.rom_hash)) {
         return false;
     }
 
