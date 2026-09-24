@@ -24,8 +24,23 @@ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& 
     events_callbacks = callbacks;
 }
 
+#if defined(__ANDROID__)
+static uint32_t dora64_dl_hash(const uint8_t* bytes) {
+    uint32_t hash = 2166136261u;
+    for (uint32_t i = 0; i < 0x1000; i++) {
+        hash = (hash ^ bytes[i]) * 16777619u;
+    }
+    return hash;
+}
+#endif
+
 struct SpTaskAction {
     OSTask task;
+#if defined(__ANDROID__)
+    uint32_t debug_nested_addr = 0;
+    uint32_t debug_nested_hash = 0;
+    std::chrono::steady_clock::time_point debug_submitted_at{};
+#endif
 };
 
 struct ScreenUpdateAction {
@@ -395,19 +410,51 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
             // Determine the action type and act on it
             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
                 std::unique_lock rdram_lock{ events_context.graphics_rdram_mutex };
-                // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
-                // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
-                // is finished as well, so sending this early shouldn't be an issue in most cases.
-                // If this causes issues then the logic can be replaced with responding to yield requests.
-                sp_complete();
                 ultramodern::measure_input_latency();
+#if defined(__ANDROID__)
+                const auto queue_delay = std::chrono::steady_clock::now() - task_action->debug_submitted_at;
+                if (task_action->debug_nested_addr != 0) {
+                    const uint32_t current_hash = dora64_dl_hash(rdram + task_action->debug_nested_addr);
+                    if (current_hash != task_action->debug_nested_hash) {
+                        std::fprintf(stderr, "Dora64 DL changed before parse: target=%08X submit=%08X parse=%08X task=%08X\n",
+                            task_action->debug_nested_addr, task_action->debug_nested_hash,
+                            current_hash, task_action->task.t.data_ptr);
+                        std::fflush(stderr);
+                    }
+                }
+#endif
 
+                // Keep the original RSP timing; delaying this until parsing completes
+                // did not prevent Doraemon's nested-list corruption and stalls the game.
+                sp_complete();
                 PTR(u64) displaylist = task_action->task.t.data_ptr;
                 ultramodern::extensions::on_displaylist_submitted(displaylist);
 
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
                 renderer_context->send_dl(&task_action->task);
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+#if defined(__ANDROID__)
+                static uint32_t gfx_samples = 0;
+                static uint32_t gfx_tracked = 0;
+                static uint64_t gfx_queue_total_us = 0, gfx_parse_total_us = 0;
+                static uint64_t gfx_queue_max_us = 0, gfx_parse_max_us = 0;
+                const uint64_t queue_us = std::chrono::duration_cast<std::chrono::microseconds>(queue_delay).count();
+                const uint64_t parse_us = std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count();
+                gfx_queue_total_us += queue_us;
+                gfx_parse_total_us += parse_us;
+                gfx_queue_max_us = std::max(gfx_queue_max_us, queue_us);
+                gfx_parse_max_us = std::max(gfx_parse_max_us, parse_us);
+                gfx_tracked += (task_action->debug_nested_addr != 0);
+                if (++gfx_samples == 30) {
+                    std::fprintf(stderr, "Dora64 gfx 30 tasks: tracked=%u queue avg=%llu max=%llu us, parse avg=%llu max=%llu us\n",
+                        gfx_tracked,
+                        (unsigned long long)(gfx_queue_total_us / gfx_samples), (unsigned long long)gfx_queue_max_us,
+                        (unsigned long long)(gfx_parse_total_us / gfx_samples), (unsigned long long)gfx_parse_max_us);
+                    std::fflush(stderr);
+                    gfx_samples = gfx_tracked = 0;
+                    gfx_queue_total_us = gfx_parse_total_us = gfx_queue_max_us = gfx_parse_max_us = 0;
+                }
+#endif
                 rdram_lock.unlock();
 
                 dp_complete();
@@ -421,7 +468,25 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 // to the new current framebuffer. Use the VI snapshot captured
                 // by that hook rather than the previous retrace's registers.
                 events_context.vi.update_screen_regs = screen_update_action->regs;
+#if defined(__ANDROID__)
+                const auto screen_start = std::chrono::steady_clock::now();
+#endif
                 renderer_context->update_screen(screen_update_action->cpu_changes_only);
+#if defined(__ANDROID__)
+                static uint32_t screen_samples = 0;
+                static uint64_t screen_total_us = 0, screen_max_us = 0;
+                const uint64_t screen_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - screen_start).count();
+                screen_total_us += screen_us;
+                screen_max_us = std::max(screen_max_us, screen_us);
+                if (++screen_samples == 30) {
+                    std::fprintf(stderr, "Dora64 screen 30 updates: avg=%llu max=%llu us\n",
+                        (unsigned long long)(screen_total_us / screen_samples), (unsigned long long)screen_max_us);
+                    std::fflush(stderr);
+                    screen_samples = 0;
+                    screen_total_us = screen_max_us = 0;
+                }
+#endif
                 display_refresh_rate = renderer_context->get_display_framerate();
                 resolution_scale = renderer_context->get_resolution_scale();
             }
@@ -659,7 +724,24 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
 
     // Send gfx tasks to the graphics action queue
     if (task->t.type == M_GFXTASK) {
-        events_context.action_queue.enqueue(SpTaskAction{ *task });
+        SpTaskAction action{ *task };
+#if defined(__ANDROID__)
+        const uint32_t dl_start = task->t.data_ptr & 0x7FFFFFu;
+        if (dl_start <= 0x800000u - 0x120u) {
+            uint32_t caller_w0, caller_w1;
+            std::memcpy(&caller_w0, rdram + dl_start + 0x118u, sizeof(caller_w0));
+            std::memcpy(&caller_w1, rdram + dl_start + 0x11Cu, sizeof(caller_w1));
+            if (caller_w0 == 0x06000000u) {
+                const uint32_t target = caller_w1 & 0x7FFFFFu;
+                if (target != 0 && target <= 0x800000u - 0x1000u) {
+                    action.debug_nested_addr = target;
+                    action.debug_nested_hash = dora64_dl_hash(rdram + target);
+                }
+            }
+        }
+        action.debug_submitted_at = std::chrono::steady_clock::now();
+#endif
+        events_context.action_queue.enqueue(std::move(action));
     }
     // Set all other tasks as the RSP task
     else {
