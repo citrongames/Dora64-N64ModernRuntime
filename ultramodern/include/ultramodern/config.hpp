@@ -12,6 +12,7 @@ namespace ultramodern {
             Original,
             Original2x,
             Auto,
+            Original4x,
             OptionCount
         };
         enum class WindowMode {
@@ -99,6 +100,7 @@ namespace ultramodern {
             {ultramodern::renderer::Resolution::Original, "Original"},
             {ultramodern::renderer::Resolution::Original2x, "Original2x"},
             {ultramodern::renderer::Resolution::Auto, "Auto"},
+            {ultramodern::renderer::Resolution::Original4x, "Original4x"},
         });
 
         NLOHMANN_JSON_SERIALIZE_ENUM(ultramodern::renderer::WindowMode, {
