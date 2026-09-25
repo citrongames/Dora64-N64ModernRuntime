@@ -724,6 +724,15 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
 
     // Send gfx tasks to the graphics action queue
     if (task->t.type == M_GFXTASK) {
+#if defined(__ANDROID__)
+        // PI DMA holds this mutex while copying ROM data into RDRAM. Take the
+        // same lock for the entire snapshot so a graphics task cannot capture
+        // half of an old display list and half of the next resource bank.
+        std::unique_lock rdram_lock{ events_context.graphics_rdram_mutex };
+#endif
+        if (events_callbacks.gfx_task_submitted_callback != nullptr) {
+            events_callbacks.gfx_task_submitted_callback(rdram, task->t.data_ptr, task->t.data_size);
+        }
         SpTaskAction action{ *task };
 #if defined(__ANDROID__)
         const uint32_t dl_start = task->t.data_ptr & 0x7FFFFFu;

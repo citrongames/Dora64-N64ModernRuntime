@@ -284,6 +284,25 @@ void do_dma(
     }
     // TODO asynchronous transfer
     // TODO implement unaligned DMA correctly
+#if defined(__ANDROID__)
+    // Keep a small, targeted trace of the bank involved in the level-entry
+    // crash. The ROM offset is more useful than the cartridge bus address.
+    if (direction == 0 && physical_addr >= recomp::rom_base) {
+        const uint32_t rom_offset = physical_addr - recomp::rom_base;
+        const uint32_t ram_offset = uint32_t(rdram_address) & 0x7FFFFFu;
+        const auto contains = [size](uint32_t begin, uint32_t target) {
+            return uint64_t(begin) <= target && uint64_t(target) < uint64_t(begin) + size;
+        };
+        if (contains(ram_offset, 0x1E19D0u) ||
+            contains(ram_offset, 0x1E3870u) ||
+            contains(rom_offset, 0x245080u)) {
+            std::fprintf(stderr,
+                "Dora64 bank DMA: rom=%08X rdram=%08X size=%08X\n",
+                rom_offset, ram_offset, size);
+            std::fflush(stderr);
+        }
+    }
+#endif
     if (direction == 0) {
         if (physical_addr >= recomp::rom_base) {
             // read cart rom
