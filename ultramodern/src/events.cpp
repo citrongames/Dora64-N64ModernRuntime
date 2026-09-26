@@ -24,7 +24,7 @@ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& 
     events_callbacks = callbacks;
 }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
 static uint32_t dora64_dl_hash(const uint8_t* bytes) {
     uint32_t hash = 2166136261u;
     for (uint32_t i = 0; i < 0x1000; i++) {
@@ -36,7 +36,7 @@ static uint32_t dora64_dl_hash(const uint8_t* bytes) {
 
 struct SpTaskAction {
     OSTask task;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
     uint32_t debug_nested_addr = 0;
     uint32_t debug_nested_hash = 0;
     std::chrono::steady_clock::time_point debug_submitted_at{};
@@ -411,7 +411,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
                 std::unique_lock rdram_lock{ events_context.graphics_rdram_mutex };
                 ultramodern::measure_input_latency();
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
                 const auto queue_delay = std::chrono::steady_clock::now() - task_action->debug_submitted_at;
                 if (task_action->debug_nested_addr != 0) {
                     const uint32_t current_hash = dora64_dl_hash(rdram + task_action->debug_nested_addr);
@@ -433,7 +433,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
                 renderer_context->send_dl(&task_action->task);
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
                 static uint32_t gfx_samples = 0;
                 static uint32_t gfx_tracked = 0;
                 static uint64_t gfx_queue_total_us = 0, gfx_parse_total_us = 0;
@@ -468,11 +468,11 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 // to the new current framebuffer. Use the VI snapshot captured
                 // by that hook rather than the previous retrace's registers.
                 events_context.vi.update_screen_regs = screen_update_action->regs;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
                 const auto screen_start = std::chrono::steady_clock::now();
 #endif
                 renderer_context->update_screen(screen_update_action->cpu_changes_only);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
                 static uint32_t screen_samples = 0;
                 static uint64_t screen_total_us = 0, screen_max_us = 0;
                 const uint64_t screen_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -734,7 +734,7 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
             events_callbacks.gfx_task_submitted_callback(rdram, task->t.data_ptr, task->t.data_size);
         }
         SpTaskAction action{ *task };
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(DORA64_ANDROID_DIAGNOSTICS)
         const uint32_t dl_start = task->t.data_ptr & 0x7FFFFFu;
         if (dl_start <= 0x800000u - 0x120u) {
             uint32_t caller_w0, caller_w1;
