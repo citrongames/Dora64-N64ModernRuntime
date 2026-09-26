@@ -69,7 +69,8 @@ namespace ultramodern {
             DynamicLibrariesNotFound,
             InvalidGraphicsAPI,
             GraphicsAPINotFound,
-            GraphicsDeviceNotFound
+            GraphicsDeviceNotFound,
+            GraphicsPipelineCreationFailed
         };
 
         class RendererContext {

@@ -813,6 +813,9 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
             case ultramodern::renderer::SetupResult::GraphicsDeviceNotFound:
                 show_renderer_error("Unable to find compatible graphics device." + driver_os_suffix);
                 break;
+            case ultramodern::renderer::SetupResult::GraphicsPipelineCreationFailed:
+                show_renderer_error("The graphics driver could not create the required shaders, including the compatibility path where applicable. Please share the Android log with the Dora64 developers.");
+                break;
         }
         throw std::runtime_error("Failed to initialize the renderer");
     }
